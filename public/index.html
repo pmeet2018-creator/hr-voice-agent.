@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HR Voice Interviews</title>
+<style>
+:root{--bg:#faf7f2;--card:#fff;--ink:#2b2622;--mut:#7a7068;--acc:#c2571a;--ok:#2e7d4f;--bad:#b3261e;--line:#e8e0d6}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
+header{padding:14px 20px;background:var(--card);border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center}
+header h1{font-size:18px;margin:0;flex:1}
+main{display:grid;grid-template-columns:280px 1fr;gap:16px;padding:16px;max-width:1200px;margin:auto}
+@media(max-width:800px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+h2{font-size:15px;margin:0 0 10px}
+input,textarea,button{font:inherit}input,textarea{width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer}
+button.sec{background:#efe7dc;color:var(--ink)}button.ok{background:var(--ok)}button.bad{background:var(--bad)}button:disabled{opacity:.5}
+.job{padding:8px;border-radius:8px;cursor:pointer;border:1px solid transparent}.job:hover,.job.on{background:#f5ece0;border-color:var(--line)}
+.job small{color:var(--mut);display:block}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--mut);text-transform:uppercase}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:#efe7dc}
+.tag.interviewed{background:#dff1e5;color:var(--ok)}.tag.no_answer,.tag.failed{background:#f8dedb;color:var(--bad)}.tag.calling,.tag.processing{background:#fdeccf}
+.detail{background:#fcfaf6;padding:12px;border-radius:8px;margin:6px 0}
+pre{white-space:pre-wrap;font:13px/1.5 inherit;margin:6px 0;max-height:260px;overflow:auto}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+#msg{color:var(--mut);font-size:13px}
+</style></head><body>
+<header><h1>HR Voice Interviews</h1><span id="msg"></span></header>
+<main>
+<div>
+  <div class="card"><h2>Jobs</h2><div id="jobs"></div></div>
+  <div class="card" style="margin-top:12px"><h2>New job</h2>
+    <input id="co" placeholder="Company name"><input id="role" placeholder="Role (e.g. Accountant)">
+    <textarea id="qs" rows="6" placeholder="One interview question per line"></textarea>
+    <button onclick="addJob()">Create job</button></div>
+</div>
+<div id="main"><div class="card">Select or create a job.</div></div>
+</main>
+<script>
+let jobs=[],cur=null,cands=[],open=null,timer=null,note='',busy=false;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const say=t=>{$('msg').textContent=t;setTimeout(()=>{if($('msg').textContent===t)$('msg').textContent=''},6000)};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const hdr=()=>{let p=null;try{p=sessionStorage.getItem('pw')}catch{}return p?{Authorization:'Basic '+btoa(unescape(encodeURIComponent(':'+p)))}:{}};
+async function af(url,opt={}){
+  opt.headers={...(opt.headers||{}),...hdr()};let r=await fetch(url,opt);
+  if(r.status===401){const p=prompt('Password');if(p===null)return r;try{sessionStorage.setItem('pw',p)}catch{}opt.headers={...(opt.headers||{}),...hdr()};r=await fetch(url,opt)}
+  return r}
+async function api(url,method='GET',body){
+  const r=await af(url,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
+async function loadJobs(){jobs=await api('/api/jobs');
+  $('jobs').innerHTML=jobs.map(j=>`<div class="job ${cur?.id===j.id?'on':''}" onclick="pick('${j.id}')"><b>${esc(j.role)}</b><small>${esc(j.company)} · ${j.interviewed}/${j.total} interviewed</small></div>`).join('')||'<small>No jobs yet</small>'}
+async function addJob(){try{
+  await api('/api/jobs','POST',{company:$('co').value,role:$('role').value,questions:$('qs').value.split('\n')});
+  $('co').value=$('role').value=$('qs').value='';await loadJobs();pick(jobs[jobs.length-1].id)}catch(e){say(e.message)}}
+async function pick(id){cur=jobs.find(j=>j.id===id);open=null;note='';await refresh();loadJobs();
+  clearInterval(timer);timer=setInterval(()=>{if(!busy)refresh()},15000)}
+async function refresh(){if(!cur)return;try{cands=await api(`/api/jobs/${cur.id}/candidates`);render()}catch(e){say(e.message)}}
+function render(){const p=$('paste'),keep=p?p.value:'',foc=p&&document.activeElement===p;draw();const q=$('paste');if(q){q.value=keep;if(foc)q.focus()}}
+function extras(c){const known=/^(summary|answers?|notice_period|expected_ctc|expected_salary|score(_1_to_10)?|rating|recommendation)$/i;
+  return Object.entries(c.analysis||{}).filter(([k])=>!known.test(k)).map(([k,v])=>`<b>${esc(k)}:</b> ${esc(typeof v==='object'?JSON.stringify(v):v)}`).join(' · ')}
+function draw(){
+  const sorted=[...cands].sort((a,b)=>(b.score??-1)-(a.score??-1));
+  $('main').innerHTML=`<div class="card"><h2>${esc(cur.role)} — ${esc(cur.company)}</h2>
+  <details><summary>Questions (${cur.questions.length})</summary><ol>${cur.questions.map(q=>`<li>${esc(q.replace(/^\d+\s*[.)]\s*/,''))}</li>`).join('')}</ol></details>
+  <textarea id="paste" rows="3" placeholder="Add candidates: Name, Phone (one per line)"></textarea>
+  <div class="row"><button class="sec" onclick="addC()">Add candidates</button>
+  <button class="sec" onclick="document.getElementById('xl').click()">Import Excel / CSV</button>
+  <input type="file" id="xl" accept=".xlsx,.csv,.txt" style="display:none" onchange="importFile(this)">
+  <button onclick="callAll()" ${busy?'disabled':''}>Call all pending</button>
+  <button class="sec" onclick="exportCsv()">Export CSV</button></div>
+  ${note?`<div class="detail" style="white-space:pre-line;margin-bottom:10px">${esc(note)}</div>`:'<small style="color:var(--mut)">Excel/CSV: Name in column A, Phone in column B (header row optional).</small>'}
+  <table><tr><th>Candidate</th><th>Status</th><th>Score</th><th>AI says</th><th>HR</th><th></th></tr>
+  ${sorted.map(c=>`<tr><td><b>${esc(c.name)}</b><br><small>${esc(c.phone)}</small></td>
+  <td><span class="tag ${c.status}">${esc(c.status)}</span>${c.failReason?`<br><small>${esc(c.failReason)}</small>`:''}</td><td>${c.score??'-'}</td><td>${esc(c.recommendation)}</td>
+  <td>${esc(c.decision)}</td><td>${c.status==='interviewed'?`<button class="sec" onclick="tog('${c.id}')">View</button>`:`<button class="sec" onclick="callOne('${c.id}')" ${c.status==='calling'?'disabled':''}>Call</button>`}</td></tr>
+  ${open===c.id?`<tr><td colspan="6"><div class="detail">
+   ${(c.recordingPath||c.recordingUrl)?`<audio controls src="${esc(c.recordingPath||c.recordingUrl)}" style="width:100%"></audio>`:''}
+   <p><b>Summary:</b> ${esc(c.summary)}</p>
+   <p><b>Notice period:</b> ${esc(c.noticePeriod)||'-'} · <b>Expected CTC:</b> ${esc(c.expectedCtc)||'-'}${c.durationSec?` · ${c.durationSec}s`:''}</p>
+   ${extras(c)?`<p>${extras(c)}</p>`:''}
+   <b>Answers</b><pre>${esc(c.answers)}</pre>
+   <details><summary>Full transcript</summary><pre>${esc(c.transcript)}</pre></details>
+   <div class="row" style="margin-top:8px"><button class="ok" onclick="dec('${c.id}','shortlisted')">Shortlist</button>
+   <button class="bad" onclick="dec('${c.id}','rejected')">Reject</button><button class="sec" onclick="dec('${c.id}','')">Clear</button></div>
+  </div></td></tr>`:''}`).join('')||'<tr><td colspan="6">No candidates yet</td></tr>'}</table></div>`}
+const tog=id=>{open=open===id?null:id;render()};
+const summ=r=>`Added ${r.added}`+(r.duplicates?` · ${r.duplicates} already in list`:'')+(r.invalid.length?` · ${r.invalid.length} skipped (need a name and a 10-digit number):\n`+r.invalid.slice(0,5).join('\n'):'');
+async function addC(){try{const t=$('paste').value;if(!t.trim()){note='Type or paste: Name, Phone (one per line)';return render()}
+  const r=await api(`/api/jobs/${cur.id}/candidates`,'POST',{text:t});note=summ(r);$('paste').value=r.invalid.join('\n');await refresh();loadJobs()}catch(e){note=e.message;render()}}
+async function importFile(inp){const f=inp.files[0];if(!f)return;try{
+  const res=await af(`/api/jobs/${cur.id}/import`,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:await f.arrayBuffer()});
+  const r=await res.json().catch(()=>({}));if(!res.ok)throw new Error(r.error||res.status);note=`${f.name}: `+summ(r);await refresh();loadJobs()}catch(e){note=e.message;render()}inp.value=''}
+async function callOne(id){try{await api(`/api/candidates/${id}/call`,'POST');say('Call started');refresh()}catch(e){note=e.message;render()}}
+async function callAll(){
+  if(!confirm('Call all pending candidates now?'))return;
+  let ids;try{ids=(await api(`/api/jobs/${cur.id}/call`,'POST',{})).ids}
+  catch(e){if(/Outside/.test(e.message)&&confirm(e.message+' Call anyway?'))ids=(await api(`/api/jobs/${cur.id}/call`,'POST',{force:true})).ids;else{note=e.message;return render()}}
+  if(!ids.length){note='Nobody pending.';return render()}
+  busy=true;let ok=0;const errs=[];
+  for(const id of ids){note=`Calling ${ok+errs.length+1} of ${ids.length}...`;render();
+    try{await api(`/api/candidates/${id}/call`,'POST');ok++}catch(e){errs.push(e.message);if(/balance|spend|KYC|Telephony|DNC|not set|No response/i.test(e.message))break}
+    await sleep(1500)}
+  busy=false;note=`Started ${ok} call(s).`+(errs.length?`\nProblem: ${errs[0]}`:'');await refresh();loadJobs()}
+async function exportCsv(){try{const r=await af(`/api/jobs/${cur.id}/export.csv`);if(!r.ok)throw new Error(r.status);
+  const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());a.download='candidates.csv';a.click()}catch(e){say('Export failed: '+e.message)}}
+async function dec(id,d){await api(`/api/candidates/${id}`,'PATCH',{decision:d});refresh()}
+loadJobs().catch(e=>say(e.message));
+</script></body></html>
